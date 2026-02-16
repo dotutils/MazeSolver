@@ -59,6 +59,15 @@
                               ToolTip="Provide GetContextUsage tool to the LLM to query context window usage"
                               Checked="ContextUsageToolCheckBox_Changed"
                               Unchecked="ContextUsageToolCheckBox_Changed"/>
+                    
+                    <CheckBox x:Name="UnlimitedContextCheckBox" 
+                              Content="Unlimited Context" 
+                              IsChecked="False" 
+                              VerticalAlignment="Center"
+                              Margin="10,0,0,0"
+                              ToolTip="Add statement to system prompt about unlimited context through automatic summarization"
+                              Checked="UnlimitedContextCheckBox_Changed"
+                              Unchecked="UnlimitedContextCheckBox_Changed"/>
                 </StackPanel>
                 <Label Content="Click cells to toggle path/wall" Foreground="Gray" Padding="0,5,0,0"/>
             </StackPanel>

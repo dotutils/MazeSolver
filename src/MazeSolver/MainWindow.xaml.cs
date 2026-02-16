@@ -379,4 +379,13 @@ public partial class MainWindow : Window
             Log.Information("ProvideContextUsageTool set to {Value}", _solverService.ProvideContextUsageTool);
         }
     }
+
+    private void UnlimitedContextCheckBox_Changed(object sender, RoutedEventArgs e)
+    {
+        if (_solverService != null)
+        {
+            _solverService.UnlimitedContextStatement = UnlimitedContextCheckBox.IsChecked ?? false;
+            Log.Information("UnlimitedContextStatement set to {Value}", _solverService.UnlimitedContextStatement);
+        }
+    }
 }

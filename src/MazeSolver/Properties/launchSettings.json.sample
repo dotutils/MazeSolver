@@ -4,18 +4,18 @@
     "MazeSolver": {
       "commandName": "Project",
       "environmentVariables": {
-        "LLM_ENDPOINT": "<your-azure-ai-endpoint>",
-        "LLM_MODEL": "<your-model-name>",
-        "LLM_API_KEY": "<your-api-key>"
+        "LLM_ENDPOINT": "",
+        "LLM_MODEL": "",
+        "LLM_API_KEY": ""
       }
     },
     "MazeSolver-CLI": {
       "commandName": "Project",
       "commandLineArgs": "--cli --width 10 --height 10 --auto-solve",
       "environmentVariables": {
-        "LLM_ENDPOINT": "<your-azure-ai-endpoint>",
-        "LLM_MODEL": "<your-model-name>",
-        "LLM_API_KEY": "<your-api-key>"
+        "LLM_ENDPOINT": "",
+        "LLM_MODEL": "",
+        "LLM_API_KEY": ""
       }
     }
   }

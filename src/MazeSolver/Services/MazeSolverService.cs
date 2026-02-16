@@ -28,6 +28,11 @@ public class MazeSolverService
     /// If true, provides the GetContextUsage tool to the LLM, allowing it to query context usage statistics.
     /// </summary>
     public bool ProvideContextUsageTool { get; set; } = false;
+    
+    /// <summary>
+    /// If true, adds a statement to the system prompt indicating unlimited context through automatic summarization.
+    /// </summary>
+    public bool UnlimitedContextStatement { get; set; } = false;
 
     private readonly LlmService _llmService;
     private readonly HashSet<Position> _discoveredCells = new();
@@ -267,6 +272,9 @@ public class MazeSolverService
     {
         return $@"You are a maze-solving AI. Your task is to find a path from the entry point to the exit.
 
+You need to continue exploring the maze until you find the exit - even if it takes many steps and even if your context fills up.
+Do not stop prematurely!
+
 You have one tool available: GetNeighbours(x, y)
 This tool returns the status of all 8 cells around the given position.
 
@@ -289,11 +297,17 @@ Exit position: ({maze.Exit.X}, {maze.Exit.Y})
 
 Important: Only move to cells with status ""path"" or ""exit"". Avoid walls and out of bounds.
 Call GetNeighbours repeatedly to explore the maze systematically. A good strategy is depth-first search or similar.
-When you find the exit, respond with the complete path as a list of coordinates.{(ForceAdjacentDiscovery ? @"
+When you find the exit, respond with the complete path as a list of coordinates.{(UnlimitedContextStatement ? @"
+
+The conversation has unlimited context through automatic summarization." : "")}{(ForceAdjacentDiscovery ? @"
 
 CRITICAL CONSTRAINT: You can ONLY query cells that are adjacent (including diagonally) to cells you have already discovered.
 Your first query must be the entry position. After that, you can only query cells that are neighbors of any previously queried cell.
-Querying a non-adjacent cell will result in an error. Plan your exploration path carefully - you cannot jump to distant cells." : "")}";
+Querying a non-adjacent cell will result in an error. Plan your exploration path carefully - you cannot jump to distant cells." : "")}
+
+After each tool call, output exactly this message:
+""I'm not finished. I need to continue! I need to explore the path further till the exit!""
+";
     }
 
     private string ProcessToolCall(Maze maze, ToolUseBlock toolCall)
