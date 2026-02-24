@@ -8,9 +8,10 @@ using System.Text.Json;
 namespace MazeSolver.Services;
 
 /// <summary>
-/// Wrapper service for Anthropic LLM API
+/// Wrapper service for Anthropic LLM API, implementing the provider-independent ILlmService.
+/// Converts between Anthropic SDK types and the unified LlmTypes.
 /// </summary>
-public class LlmService
+public class LlmService : ILlmService
 {
     private readonly AnthropicClient _client;
     private readonly string _model;
@@ -18,7 +19,7 @@ public class LlmService
     /// <summary>
     /// Maximum context window for Claude Sonnet 4.5 (200K tokens)
     /// </summary>
-    public const int MaxContextTokens = 200_000;
+    public int MaxContextTokens { get; set; } = 200_000;
 
     public LlmService()
     {
@@ -31,33 +32,39 @@ public class LlmService
 
         Log.Information("Initializing LLM service with endpoint: {Endpoint}, model: {Model}", endpoint, _model);
 
-        // Set environment variables for the SDK
         Environment.SetEnvironmentVariable("ANTHROPIC_API_KEY", apiKey);
         Environment.SetEnvironmentVariable("ANTHROPIC_BASE_URL", endpoint);
         
         _client = new AnthropicClient();
     }
 
-    /// <summary>
-    /// Sends a message to the LLM and returns the response (with retry for rate limits)
-    /// </summary>
     public async Task<LlmResponse> SendMessageAsync(
         string systemPrompt,
-        List<MessageParam> messages,
-        List<ToolUnion>? tools = null,
+        List<LlmMessage> messages,
+        List<LlmToolDefinition>? tools = null,
         int maxTokens = 4096,
         CancellationToken cancellationToken = default)
     {
         Log.Debug("Sending message to LLM. Messages count: {Count}, Has tools: {HasTools}", 
             messages.Count, tools != null);
 
+        // Convert unified messages → Anthropic MessageParam
+        var anthropicMessages = messages.Select(ConvertToAnthropicMessage).ToList();
+
+        // Convert unified tools → Anthropic ToolUnion
+        List<ToolUnion>? anthropicTools = null;
+        if (tools != null && tools.Count > 0)
+        {
+            anthropicTools = tools.Select(ConvertToAnthropicTool).ToList();
+        }
+
         var parameters = new MessageCreateParams
         {
             Model = _model,
             MaxTokens = maxTokens,
             System = systemPrompt,
-            Messages = messages,
-            Tools = tools
+            Messages = anthropicMessages,
+            Tools = anthropicTools
         };
 
         int maxRetries = 5;
@@ -68,48 +75,14 @@ public class LlmService
             try
             {
                 var response = await _client.Messages.Create(parameters, cancellationToken: cancellationToken);
-                
-                // Extract the stop reason as a clean string
-                string stopReason = "unknown";
-                if (response.StopReason != null)
-                {
-                    var stopReasonStr = response.StopReason.ToString() ?? "";
-                    // Parse "ApiEnum { Json = tool_use }" -> "tool_use"
-                    if (stopReasonStr.Contains("Json = "))
-                    {
-                        var startIdx = stopReasonStr.IndexOf("Json = ") + 7;
-                        var endIdx = stopReasonStr.IndexOf(" ", startIdx);
-                        if (endIdx == -1) endIdx = stopReasonStr.IndexOf("}", startIdx);
-                        if (endIdx > startIdx)
-                        {
-                            stopReason = stopReasonStr.Substring(startIdx, endIdx - startIdx).Trim();
-                        }
-                    }
-                    else
-                    {
-                        stopReason = stopReasonStr;
-                    }
-                }
-                
-                var result = new LlmResponse
-                {
-                    Message = response,
-                    InputTokens = response.Usage.InputTokens,
-                    OutputTokens = response.Usage.OutputTokens,
-                    StopReason = stopReason
-                };
-
-                Log.Debug("LLM response received. Input tokens: {Input}, Output tokens: {Output}, Stop reason: {StopReason}",
-                    result.InputTokens, result.OutputTokens, result.StopReason);
-
-                return result;
+                return ConvertFromAnthropicResponse(response);
             }
-            catch (AnthropicRateLimitException ex) when (attempt < maxRetries)
+            catch (AnthropicRateLimitException) when (attempt < maxRetries)
             {
                 Log.Warning("Rate limit hit (attempt {Attempt}/{MaxRetries}). Waiting {Delay}s before retry...", 
                     attempt, maxRetries, retryDelaySeconds);
                 await Task.Delay(TimeSpan.FromSeconds(retryDelaySeconds), cancellationToken);
-                retryDelaySeconds *= 2; // Exponential backoff
+                retryDelaySeconds *= 2;
             }
             catch (AnthropicBadRequestException ex) when (
                 ex.Message.Contains("context", StringComparison.OrdinalIgnoreCase) ||
@@ -130,65 +103,15 @@ public class LlmService
         throw new InvalidOperationException("Max retries exceeded for rate limit");
     }
 
-    /// <summary>
-    /// Creates the GetNeighbours tool definition
-    /// </summary>
-    public static ToolUnion CreateGetNeighboursTool()
-    {
-        return new Tool
-        {
-            Name = "GetNeighbours",
-            Description = "Get the status of all 8 neighbouring cells around a given position. " +
-                         "Returns status for each direction: N, NE, E, SE, S, SW, W, NW. " +
-                         "Status can be 'path', 'wall', 'exit', or 'out_of_bounds'. " +
-                         "Use this tool to explore the maze and find the path to the exit.",
-            InputSchema = new InputSchema
-            {
-                Properties = new Dictionary<string, JsonElement>
-                {
-                    ["x"] = JsonDocument.Parse("""{"type": "integer", "description": "X coordinate (column) of the cell to check neighbours for"}""").RootElement,
-                    ["y"] = JsonDocument.Parse("""{"type": "integer", "description": "Y coordinate (row) of the cell to check neighbours for"}""").RootElement
-                },
-                Required = new List<string> { "x", "y" }
-            }
-        };
-    }
-
-    /// <summary>
-    /// Creates the GetContextUsage tool definition
-    /// </summary>
-    public static ToolUnion CreateGetContextUsageTool()
-    {
-        return new Tool
-        {
-            Name = "GetContextUsage",
-            Description = "Get the current context window usage statistics. " +
-                         "Returns the total tokens used so far and the percentage of the context window filled. " +
-                         "Use this tool to monitor your context usage and plan accordingly to avoid context overflow.",
-            InputSchema = new InputSchema
-            {
-                Properties = new Dictionary<string, JsonElement>(),
-                Required = new List<string>()
-            }
-        };
-    }
-
-    /// <summary>
-    /// Simple connection test
-    /// </summary>
     public async Task<bool> TestConnectionAsync(CancellationToken cancellationToken = default)
     {
         try
         {
             Log.Information("Testing LLM connection...");
             
-            var messages = new List<MessageParam>
+            var messages = new List<LlmMessage>
             {
-                new()
-                {
-                    Role = Role.User,
-                    Content = "Say 'Connection successful!' and nothing else."
-                }
+                LlmMessage.User("Say 'Connection successful!' and nothing else.")
             };
 
             var response = await SendMessageAsync(
@@ -197,18 +120,8 @@ public class LlmService
                 maxTokens: 50,
                 cancellationToken: cancellationToken);
 
-            string? textContent = null;
-            foreach (var block in response.Message.Content)
-            {
-                if (block.TryPickText(out var textBlock))
-                {
-                    textContent = textBlock.Text;
-                    break;
-                }
-            }
-
             Log.Information("LLM connection test successful. Response: {Response}", 
-                textContent ?? "No text response");
+                response.GetText());
             
             return true;
         }
@@ -218,26 +131,157 @@ public class LlmService
             return false;
         }
     }
-}
 
-/// <summary>
-/// Response from the LLM including token usage
-/// </summary>
-public class LlmResponse
-{
-    public required Message Message { get; set; }
-    public long InputTokens { get; set; }
-    public long OutputTokens { get; set; }
-    public string StopReason { get; set; } = string.Empty;
-    
-    public long TotalTokens => InputTokens + OutputTokens;
-}
+    #region Conversion: Unified → Anthropic
 
-/// <summary>
-/// Custom exception for context overflow
-/// </summary>
-public class ContextOverflowException : Exception
-{
-    public ContextOverflowException(string message) : base(message) { }
-    public ContextOverflowException(string message, Exception inner) : base(message, inner) { }
+    private static MessageParam ConvertToAnthropicMessage(LlmMessage msg)
+    {
+        var role = msg.Role == LlmRole.Assistant ? Role.Assistant : Role.User;
+        var contentBlocks = new List<ContentBlockParam>();
+
+        foreach (var block in msg.Content)
+        {
+            switch (block)
+            {
+                case LlmTextBlock textBlock:
+                    contentBlocks.Add(new TextBlockParam { Text = textBlock.Text });
+                    break;
+                case LlmToolUseBlock toolUse:
+                    contentBlocks.Add(new ToolUseBlockParam
+                    {
+                        ID = toolUse.Id,
+                        Name = toolUse.Name,
+                        Input = new Dictionary<string, JsonElement>(toolUse.Input)
+                    });
+                    break;
+                case LlmToolResultBlock toolResult:
+                    contentBlocks.Add(new ToolResultBlockParam(toolResult.ToolUseId)
+                    {
+                        Content = toolResult.ResultContent
+                    });
+                    break;
+            }
+        }
+
+        return new MessageParam
+        {
+            Role = role,
+            Content = contentBlocks
+        };
+    }
+
+    private static ToolUnion ConvertToAnthropicTool(LlmToolDefinition tool)
+    {
+        // Reconstruct the InputSchema from the generic object
+        var schemaJson = JsonSerializer.Serialize(tool.InputSchema);
+        var inputSchema = JsonSerializer.Deserialize<InputSchema>(schemaJson) 
+            ?? new InputSchema();
+
+        return new Tool
+        {
+            Name = tool.Name,
+            Description = tool.Description,
+            InputSchema = inputSchema
+        };
+    }
+
+    #endregion
+
+    #region Conversion: Anthropic → Unified
+
+    private static LlmResponse ConvertFromAnthropicResponse(Message response)
+    {
+        // Extract stop reason
+        string stopReason = "unknown";
+        if (response.StopReason != null)
+        {
+            var stopReasonStr = response.StopReason.ToString() ?? "";
+            if (stopReasonStr.Contains("Json = "))
+            {
+                var startIdx = stopReasonStr.IndexOf("Json = ") + 7;
+                var endIdx = stopReasonStr.IndexOf(" ", startIdx);
+                if (endIdx == -1) endIdx = stopReasonStr.IndexOf("}", startIdx);
+                if (endIdx > startIdx)
+                {
+                    stopReason = stopReasonStr.Substring(startIdx, endIdx - startIdx).Trim();
+                }
+            }
+            else
+            {
+                stopReason = stopReasonStr;
+            }
+        }
+
+        // Convert content blocks
+        var contentBlocks = new List<LlmContentBlock>();
+        foreach (var block in response.Content)
+        {
+            if (block.TryPickText(out var textBlock))
+            {
+                contentBlocks.Add(new LlmTextBlock { Text = textBlock.Text });
+            }
+            else if (block.TryPickToolUse(out var toolUseBlock))
+            {
+                contentBlocks.Add(new LlmToolUseBlock
+                {
+                    Id = toolUseBlock.ID,
+                    Name = toolUseBlock.Name,
+                    Input = toolUseBlock.Input
+                });
+            }
+        }
+
+        return new LlmResponse
+        {
+            Content = contentBlocks,
+            InputTokens = response.Usage.InputTokens,
+            OutputTokens = response.Usage.OutputTokens,
+            StopReason = stopReason
+        };
+    }
+
+    #endregion
+
+    #region Static Tool Definitions (for convenience)
+
+    public static LlmToolDefinition CreateGetNeighboursTool()
+    {
+        return new LlmToolDefinition
+        {
+            Name = "GetNeighbours",
+            Description = "Get the status of all 8 neighbouring cells around a given position. " +
+                         "Returns status for each direction: N, NE, E, SE, S, SW, W, NW. " +
+                         "Status can be 'path', 'wall', 'exit', or 'out_of_bounds'. " +
+                         "Use this tool to explore the maze and find the path to the exit.",
+            InputSchema = new
+            {
+                type = "object",
+                properties = new Dictionary<string, object>
+                {
+                    ["x"] = new { type = "integer", description = "X coordinate (column) of the cell to check neighbours for" },
+                    ["y"] = new { type = "integer", description = "Y coordinate (row) of the cell to check neighbours for" }
+                },
+                required = new[] { "x", "y" }
+            }
+        };
+    }
+
+    public static LlmToolDefinition CreateGetContextUsageTool()
+    {
+        return new LlmToolDefinition
+        {
+            Name = "GetContextUsage",
+            Description = "Get the current context window usage statistics. " +
+                         "Returns the total tokens used so far and the percentage of the context window filled. " +
+                         "Use this tool to monitor your context usage and plan accordingly to avoid context overflow.",
+            InputSchema = new
+            {
+                type = "object",
+                properties = new Dictionary<string, object>(),
+                required = Array.Empty<string>()
+            }
+        };
+    }
+
+    #endregion
 }

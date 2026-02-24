@@ -1,6 +1,8 @@
 using MazeSolver.Models;
 using MazeSolver.Services;
+using MazeSolver.Services.GitHub;
 using Serilog;
+using System.Diagnostics;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Input;
@@ -13,9 +15,13 @@ public partial class MainWindow : Window
 {
     private Maze? _maze;
     private readonly MazeGenerator _generator;
-    private LlmService? _llmService;
+    private ILlmService? _llmService;
     private MazeSolverService? _solverService;
     private CancellationTokenSource? _cts;
+    
+    // GitHub Copilot state
+    private GitHubCopilotTokenProvider? _copilotTokenProvider;
+    private string? _githubAccessToken;
     
     private const int CellSize = 8; // pixels per cell
     private readonly Dictionary<Position, Rectangle> _cellRectangles = new();
@@ -40,27 +46,71 @@ public partial class MainWindow : Window
 
         Loaded += async (s, e) =>
         {
-            // Initialize LLM service
+            // Auto-connect priority: 1) Anthropic env vars, 2) Cached GitHub Copilot token
             try
             {
-                _llmService = new LlmService();
-                _solverService = new MazeSolverService(_llmService);
-                SetupSolverEvents();
+                var endpoint = Environment.GetEnvironmentVariable("LLM_ENDPOINT");
+                var apiKey = Environment.GetEnvironmentVariable("LLM_API_KEY");
+                var model = Environment.GetEnvironmentVariable("LLM_MODEL");
+
+                if (!string.IsNullOrEmpty(endpoint) && !string.IsNullOrEmpty(apiKey) && !string.IsNullOrEmpty(model))
+                {
+                    _llmService = new LlmService();
+                    _solverService = new MazeSolverService(_llmService);
+                    SetupSolverEvents();
+                    UpdateConnectionStatus(true, "Anthropic", model);
+                }
+                else
+                {
+                    // Try cached GitHub Copilot token
+                    var (cachedToken, lastModel) = GitHubTokenCache.LoadToken();
+                    if (!string.IsNullOrEmpty(cachedToken))
+                    {
+                        try
+                        {
+                            // Switch UI to Copilot provider
+                            ProviderComboBox.SelectedIndex = 1; // GitHub Copilot
+                            var modelToUse = lastModel ?? "claude-sonnet-4";
+                            ModelComboBox.Text = modelToUse;
+
+                            StatusText.Text = "Connecting with cached GitHub token...";
+                            _githubAccessToken = cachedToken;
+                            await ConnectToGitHubCopilotAsync(modelToUse);
+                        }
+                        catch (UnauthorizedAccessException)
+                        {
+                            Log.Warning("Cached GitHub token is invalid/revoked. Clearing cache.");
+                            GitHubTokenCache.ClearToken();
+                            _githubAccessToken = null;
+                            UpdateConnectionStatus(false, null, null);
+                        }
+                        catch (Exception ex)
+                        {
+                            Log.Warning(ex, "Failed to auto-connect with cached Copilot token");
+                            UpdateConnectionStatus(false, null, null);
+                        }
+                    }
+                    else
+                    {
+                        UpdateConnectionStatus(false, null, null);
+                        Log.Information("No LLM credentials found. Use the UI to connect to a provider.");
+                    }
+                }
                 
-                // Generate initial maze
+                // Generate initial maze regardless of LLM connection
                 GenerateMaze();
 
-                if (autoSolve)
+                if (autoSolve && _solverService != null)
                 {
-                    await Task.Delay(500); // Brief delay to show the maze
+                    await Task.Delay(500);
                     await StartSolving();
                 }
             }
             catch (Exception ex)
             {
-                Log.Error(ex, "Failed to initialize LLM service");
-                MessageBox.Show($"Failed to initialize LLM service: {ex.Message}\n\nCheck environment variables.",
-                    "Initialization Error", MessageBoxButton.OK, MessageBoxImage.Error);
+                Log.Error(ex, "Failed to auto-initialize LLM service");
+                UpdateConnectionStatus(false, null, null);
+                GenerateMaze();
             }
         };
     }
@@ -170,6 +220,255 @@ public partial class MainWindow : Window
         };
     }
 
+    private void UpdateConnectionStatus(bool isConnected, string? provider, string? model)
+    {
+        if (isConnected)
+        {
+            ConnectionStatusText.Text = $"🟢 {provider} ({model})";
+            ConnectionStatusText.Foreground = new SolidColorBrush(Colors.Green);
+            SolveButton.IsEnabled = _maze != null;
+        }
+        else
+        {
+            ConnectionStatusText.Text = "⚪ Not connected";
+            ConnectionStatusText.Foreground = new SolidColorBrush(Colors.Gray);
+            SolveButton.IsEnabled = false;
+        }
+    }
+
+    private void ProviderComboBox_SelectionChanged(object sender, SelectionChangedEventArgs e)
+    {
+        // Guard: event fires during XAML init before other controls exist
+        if (ModelComboBox == null || RefreshModelsButton == null) return;
+
+        if (ProviderComboBox.SelectedItem is ComboBoxItem selected)
+        {
+            var tag = selected.Tag?.ToString();
+            if (tag == "GitHubCopilot")
+            {
+                // Pre-populate with some well-known Copilot models
+                ModelComboBox.Items.Clear();
+                ModelComboBox.Items.Add("claude-sonnet-4");
+                ModelComboBox.Items.Add("gpt-4o");
+                ModelComboBox.Items.Add("gpt-4.1");
+                ModelComboBox.Items.Add("o4-mini");
+                ModelComboBox.Items.Add("o3");
+                ModelComboBox.Items.Add("gemini-2.5-pro");
+                ModelComboBox.Text = "claude-sonnet-4";
+                RefreshModelsButton.IsEnabled = true;
+            }
+            else
+            {
+                // Anthropic mode - use env var model
+                ModelComboBox.Items.Clear();
+                var envModel = Environment.GetEnvironmentVariable("LLM_MODEL") ?? "";
+                if (!string.IsNullOrEmpty(envModel))
+                {
+                    ModelComboBox.Items.Add(envModel);
+                    ModelComboBox.Text = envModel;
+                }
+                RefreshModelsButton.IsEnabled = false;
+            }
+        }
+    }
+
+    private async void RefreshModelsButton_Click(object sender, RoutedEventArgs e)
+    {
+        if (_copilotTokenProvider == null)
+        {
+            MessageBox.Show("Please connect to GitHub Copilot first.", "Not Connected",
+                MessageBoxButton.OK, MessageBoxImage.Information);
+            return;
+        }
+
+        try
+        {
+            RefreshModelsButton.IsEnabled = false;
+            StatusText.Text = "Fetching available models...";
+
+            var models = await _copilotTokenProvider.GetAvailableModelsAsync();
+
+            ModelComboBox.Items.Clear();
+            var currentText = ModelComboBox.Text;
+            
+            foreach (var model in models.Where(m => m.ModelPickerEnabled || !string.IsNullOrEmpty(m.Id)))
+            {
+                ModelComboBox.Items.Add(model.Id);
+            }
+
+            // Restore selection or pick first
+            if (ModelComboBox.Items.Contains(currentText))
+            {
+                ModelComboBox.Text = currentText;
+            }
+            else if (ModelComboBox.Items.Count > 0)
+            {
+                ModelComboBox.SelectedIndex = 0;
+            }
+
+            StatusText.Text = $"Loaded {models.Count} models";
+            Log.Information("Loaded {Count} models from GitHub Copilot", models.Count);
+        }
+        catch (Exception ex)
+        {
+            Log.Error(ex, "Failed to fetch models");
+            StatusText.Text = $"Failed to fetch models: {ex.Message}";
+            MessageBox.Show($"Failed to fetch models: {ex.Message}", "Error",
+                MessageBoxButton.OK, MessageBoxImage.Error);
+        }
+        finally
+        {
+            RefreshModelsButton.IsEnabled = true;
+        }
+    }
+
+    private async void ConnectButton_Click(object sender, RoutedEventArgs e)
+    {
+        var selectedProvider = (ProviderComboBox.SelectedItem as ComboBoxItem)?.Tag?.ToString();
+        var selectedModel = ModelComboBox.Text?.Trim();
+
+        if (string.IsNullOrEmpty(selectedModel))
+        {
+            MessageBox.Show("Please select or type a model name.", "No Model",
+                MessageBoxButton.OK, MessageBoxImage.Warning);
+            return;
+        }
+
+        ConnectButton.IsEnabled = false;
+        StatusText.Text = "Connecting...";
+
+        try
+        {
+            if (selectedProvider == "GitHubCopilot")
+            {
+                await ConnectToGitHubCopilotAsync(selectedModel);
+            }
+            else
+            {
+                ConnectToAnthropic(selectedModel);
+            }
+        }
+        catch (Exception ex)
+        {
+            Log.Error(ex, "Failed to connect to {Provider}", selectedProvider);
+            UpdateConnectionStatus(false, null, null);
+            StatusText.Text = $"Connection failed: {ex.Message}";
+            MessageBox.Show($"Connection failed: {ex.Message}", "Error",
+                MessageBoxButton.OK, MessageBoxImage.Error);
+        }
+        finally
+        {
+            ConnectButton.IsEnabled = true;
+        }
+    }
+
+    private async Task ConnectToGitHubCopilotAsync(string modelName)
+    {
+        // 1. Try in-memory token, then cached token, then device flow
+        if (string.IsNullOrEmpty(_githubAccessToken))
+        {
+            var (cachedToken, _) = GitHubTokenCache.LoadToken();
+            _githubAccessToken = cachedToken;
+        }
+
+        if (string.IsNullOrEmpty(_githubAccessToken))
+        {
+            _githubAccessToken = await DoDeviceFlowAsync();
+        }
+
+        // 2. Try connecting with the token we have
+        try
+        {
+            await SetupCopilotConnection(modelName);
+            GitHubTokenCache.SaveToken(_githubAccessToken!, modelName);
+        }
+        catch (UnauthorizedAccessException)
+        {
+            // Token is invalid/revoked — clear cache and re-authenticate
+            Log.Warning("GitHub access token is invalid. Re-authenticating...");
+            GitHubTokenCache.ClearToken();
+            _githubAccessToken = null;
+
+            StatusText.Text = "Token expired, re-authenticating...";
+            _githubAccessToken = await DoDeviceFlowAsync();
+            await SetupCopilotConnection(modelName);
+            GitHubTokenCache.SaveToken(_githubAccessToken!, modelName);
+        }
+    }
+
+    /// <summary>
+    /// Runs the GitHub OAuth Device Code Flow, showing a dialog with the user code.
+    /// </summary>
+    private async Task<string> DoDeviceFlowAsync()
+    {
+        StatusText.Text = "Starting GitHub authentication...";
+
+        using var authenticator = new GitHubDeviceFlowAuthenticator((userCode, verificationUrl) =>
+        {
+            Dispatcher.Invoke(() =>
+            {
+                Clipboard.SetText(userCode);
+
+                var result = MessageBox.Show(
+                    $"GitHub authentication required.\n\n" +
+                    $"Your code: {userCode}\n" +
+                    $"(Already copied to clipboard)\n\n" +
+                    $"Click OK to open {verificationUrl} in your browser,\n" +
+                    $"then paste the code and authorize.",
+                    "GitHub Login",
+                    MessageBoxButton.OKCancel,
+                    MessageBoxImage.Information);
+
+                if (result == MessageBoxResult.OK)
+                {
+                    Process.Start(new ProcessStartInfo(verificationUrl) { UseShellExecute = true });
+                }
+            });
+        });
+
+        StatusText.Text = "Waiting for GitHub authorization...";
+        return await authenticator.AuthenticateAsync();
+    }
+
+    /// <summary>
+    /// Creates the Copilot token provider, chat client, LLM service, and tests the connection.
+    /// Throws UnauthorizedAccessException if the GitHub token is invalid.
+    /// </summary>
+    private async Task SetupCopilotConnection(string modelName)
+    {
+        StatusText.Text = "Exchanging for Copilot token...";
+        _copilotTokenProvider = new GitHubCopilotTokenProvider(_githubAccessToken!);
+        await _copilotTokenProvider.GetCopilotTokenAsync();
+
+        var chatClient = new GitHubCopilotChatClient(_copilotTokenProvider, modelName);
+        _llmService = new GitHubCopilotLlmService(chatClient, modelName);
+
+        StatusText.Text = "Testing connection...";
+        var success = await _llmService.TestConnectionAsync();
+
+        if (success)
+        {
+            _solverService = new MazeSolverService(_llmService);
+            SetupSolverEvents();
+            UpdateConnectionStatus(true, "GitHub Copilot", modelName);
+            StatusText.Text = $"Connected to GitHub Copilot ({modelName})";
+        }
+        else
+        {
+            throw new InvalidOperationException("Connection test failed");
+        }
+    }
+
+    private void ConnectToAnthropic(string modelName)
+    {
+        StatusText.Text = "Connecting to Anthropic...";
+        _llmService = new LlmService();
+        _solverService = new MazeSolverService(_llmService);
+        SetupSolverEvents();
+        UpdateConnectionStatus(true, "Anthropic", modelName);
+        StatusText.Text = $"Connected to Anthropic ({modelName})";
+    }
+
     private void GenerateMaze()
     {
         if (!int.TryParse(WidthTextBox.Text, out int width) || width < 5 || width > 500)
@@ -189,7 +488,7 @@ public partial class MainWindow : Window
         _maze = _generator.Generate(width, height);
         RenderMaze();
         
-        SolveButton.IsEnabled = true;
+        SolveButton.IsEnabled = _solverService != null;
         ClearVisitedButton.IsEnabled = true;
         OverflowIndicator.Visibility = Visibility.Collapsed;
         StatusText.Text = $"Generated {_maze.Width}x{_maze.Height} maze";

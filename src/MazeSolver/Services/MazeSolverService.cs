@@ -1,8 +1,6 @@
-using Anthropic.Models.Messages;
 using MazeSolver.Models;
 using Serilog;
 using System.Text.Json;
-using System.Text.Json.Nodes;
 
 namespace MazeSolver.Services;
 
@@ -34,7 +32,7 @@ public class MazeSolverService
     /// </summary>
     public bool UnlimitedContextStatement { get; set; } = false;
 
-    private readonly LlmService _llmService;
+    private readonly ILlmService _llmService;
     private readonly HashSet<Position> _discoveredCells = new();
     
     public event EventHandler<ToolCallEventArgs>? OnToolCall;
@@ -51,7 +49,7 @@ public class MazeSolverService
     public long TotalTokens => TotalInputTokens + TotalOutputTokens;
     public bool IsSolving { get; private set; }
 
-    public MazeSolverService(LlmService llmService)
+    public MazeSolverService(ILlmService llmService)
     {
         _llmService = llmService;
     }
@@ -84,20 +82,16 @@ public class MazeSolverService
                 maze.Entry, maze.Exit, maze.Width, maze.Height);
 
             var systemPrompt = CreateSystemPrompt(maze);
-            var tools = new List<ToolUnion> { LlmService.CreateGetNeighboursTool() };
+            var tools = new List<LlmToolDefinition> { LlmService.CreateGetNeighboursTool() };
             if (ProvideContextUsageTool)
             {
                 tools.Add(LlmService.CreateGetContextUsageTool());
             }
-            var messages = new List<MessageParam>
+            var messages = new List<LlmMessage>
             {
-                new()
-                {
-                    Role = Role.User,
-                    Content = $"Please solve the maze. Start from the entry at position ({maze.Entry.X}, {maze.Entry.Y}). " +
-                             $"Use GetNeighbours to explore cells and find the exit. " +
-                             $"When you find the exit, tell me the path you found."
-                }
+                LlmMessage.User($"Please solve the maze. Start from the entry at position ({maze.Entry.X}, {maze.Entry.Y}). " +
+                    $"Use GetNeighbours to explore cells and find the exit. " +
+                    $"When you find the exit, tell me the path you found.")
             };
 
             int maxIterations = 10000; // Safety limit
@@ -124,49 +118,20 @@ public class MazeSolverService
                     InputTokens = TotalInputTokens,
                     OutputTokens = TotalOutputTokens,
                     TotalTokens = TotalTokens,
-                    MaxTokens = LlmService.MaxContextTokens
+                    MaxTokens = _llmService.MaxContextTokens
                 });
 
                 Log.Debug("Iteration {Iteration}: Stop reason = {StopReason}, Total tokens = {Total}",
                     iteration, response.StopReason, TotalTokens);
 
                 // Add assistant response to messages
-                var contentBlocks = new List<ContentBlockParam>();
-                foreach (var block in response.Message.Content)
-                {
-                    if (block.TryPickText(out var textBlock))
-                    {
-                        contentBlocks.Add(new TextBlockParam { Text = textBlock.Text });
-                    }
-                    else if (block.TryPickToolUse(out var toolUseBlock))
-                    {
-                        contentBlocks.Add(new ToolUseBlockParam 
-                        { 
-                            ID = toolUseBlock.ID, 
-                            Name = toolUseBlock.Name, 
-                            Input = toolUseBlock.Input 
-                        });
-                    }
-                }
-                messages.Add(new MessageParam
-                {
-                    Role = Role.Assistant,
-                    Content = contentBlocks
-                });
+                messages.Add(LlmMessage.Assistant(new List<LlmContentBlock>(response.Content)));
 
                 // Check stop reason
                 if (response.StopReason == "end_turn" || response.StopReason == "EndTurn")
                 {
                     // LLM finished - check if it found the solution
-                    string textContent = "";
-                    foreach (var block in response.Message.Content)
-                    {
-                        if (block.TryPickText(out var textBlock))
-                        {
-                            textContent = textBlock.Text;
-                            break;
-                        }
-                    }
+                    string textContent = response.GetText();
 
                     result.Success = true;
                     result.Message = textContent;
@@ -184,14 +149,7 @@ public class MazeSolverService
                 // Process tool calls
                 if (response.StopReason == "tool_use" || response.StopReason == "ToolUse")
                 {
-                    var toolCalls = new List<ToolUseBlock>();
-                    foreach (var block in response.Message.Content)
-                    {
-                        if (block.TryPickToolUse(out var toolUse))
-                        {
-                            toolCalls.Add(toolUse);
-                        }
-                    }
+                    var toolCalls = response.GetToolCalls();
 
                     if (toolCalls.Count == 0)
                     {
@@ -199,7 +157,7 @@ public class MazeSolverService
                         break;
                     }
 
-                    var toolResults = new List<ContentBlockParam>();
+                    var toolResults = new List<LlmContentBlock>();
 
                     foreach (var toolCall in toolCalls)
                     {
@@ -209,18 +167,15 @@ public class MazeSolverService
                             ToolCallCount, toolCall.Name, toolCall.Input);
 
                         var toolResult = ProcessToolCall(maze, toolCall);
-                        toolResults.Add(new ToolResultBlockParam(toolCall.ID)
+                        toolResults.Add(new LlmToolResultBlock
                         {
-                            Content = toolResult
+                            ToolUseId = toolCall.Id,
+                            ResultContent = toolResult
                         });
                     }
 
                     // Add tool results to messages
-                    messages.Add(new MessageParam
-                    {
-                        Role = Role.User,
-                        Content = toolResults.Cast<ContentBlockParam>().ToList()
-                    });
+                    messages.Add(LlmMessage.User(toolResults));
                 }
                 else
                 {
@@ -310,7 +265,7 @@ After each tool call, output exactly this message:
 ";
     }
 
-    private string ProcessToolCall(Maze maze, ToolUseBlock toolCall)
+    private string ProcessToolCall(Maze maze, LlmToolUseBlock toolCall)
     {
         if (toolCall.Name == "GetContextUsage")
         {
@@ -324,7 +279,7 @@ After each tool call, output exactly this message:
 
         try
         {
-            // Parse the input - it comes as IReadOnlyDictionary<string, JsonElement>
+            // Parse the input
             int x, y;
             
             var input = toolCall.Input;
@@ -485,8 +440,8 @@ END OF CELL ANALYSIS REPORT FOR POSITION ({x}, {y})
         ContextUsageToolCallCount++;
         OnContextUsageToolCall?.Invoke(this, ContextUsageToolCallCount);
         
-        var usagePercentage = LlmService.MaxContextTokens > 0 
-            ? (double)TotalTokens / LlmService.MaxContextTokens * 100 
+        var usagePercentage = _llmService.MaxContextTokens > 0 
+            ? (double)TotalTokens / _llmService.MaxContextTokens * 100 
             : 0;
 
         var result = new
@@ -494,9 +449,9 @@ END OF CELL ANALYSIS REPORT FOR POSITION ({x}, {y})
             totalTokensUsed = TotalTokens,
             inputTokens = TotalInputTokens,
             outputTokens = TotalOutputTokens,
-            maxContextTokens = LlmService.MaxContextTokens,
+            maxContextTokens = _llmService.MaxContextTokens,
             usagePercentage = Math.Round(usagePercentage, 2),
-            remainingTokens = LlmService.MaxContextTokens - TotalTokens,
+            remainingTokens = _llmService.MaxContextTokens - TotalTokens,
             status = usagePercentage >= 90 ? "critical" : usagePercentage >= 70 ? "warning" : "ok"
         };
 

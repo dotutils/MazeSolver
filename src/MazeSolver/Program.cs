@@ -1,5 +1,6 @@
 using MazeSolver.Models;
 using MazeSolver.Services;
+using MazeSolver.Services.GitHub;
 using Serilog;
 
 namespace MazeSolver;
@@ -21,6 +22,8 @@ public class Program
         bool testConnection = args.Contains("--test-connection");
         int width = GetIntArg(args, "--width", 100);
         int height = GetIntArg(args, "--height", 100);
+        string provider = GetStringArg(args, "--provider", "anthropic");
+        string model = GetStringArg(args, "--model", "");
 
         try
         {
@@ -32,7 +35,7 @@ public class Program
 
             if (cli)
             {
-                RunCliAsync(width, height, autoSolve).GetAwaiter().GetResult();
+                RunCliAsync(width, height, autoSolve, provider, model).GetAwaiter().GetResult();
             }
             else
             {
@@ -43,8 +46,12 @@ public class Program
         catch (Exception ex)
         {
             Log.Fatal(ex, "Unhandled exception");
-            Console.WriteLine($"Fatal error: {ex.Message}");
+            Console.Error.WriteLine($"Fatal error: {ex}");
             return 1;
+        }
+        finally
+        {
+            Log.CloseAndFlush();
         }
     }
 
@@ -55,6 +62,18 @@ public class Program
             if (args[i] == name && int.TryParse(args[i + 1], out int value))
             {
                 return value;
+            }
+        }
+        return defaultValue;
+    }
+
+    private static string GetStringArg(string[] args, string name, string defaultValue)
+    {
+        for (int i = 0; i < args.Length - 1; i++)
+        {
+            if (args[i] == name)
+            {
+                return args[i + 1];
             }
         }
         return defaultValue;
@@ -103,10 +122,10 @@ public class Program
         }
     }
 
-    private static async Task RunCliAsync(int width, int height, bool autoSolve)
+    private static async Task RunCliAsync(int width, int height, bool autoSolve, string provider, string model)
     {
-        Log.Information("Running in CLI mode. Width: {Width}, Height: {Height}, AutoSolve: {AutoSolve}",
-            width, height, autoSolve);
+        Log.Information("Running in CLI mode. Width: {Width}, Height: {Height}, AutoSolve: {AutoSolve}, Provider: {Provider}, Model: {Model}",
+            width, height, autoSolve, provider, model);
 
         Console.WriteLine($"Maze Solver CLI Mode");
         Console.WriteLine($"====================");
@@ -138,11 +157,25 @@ public class Program
             }
         }
 
-        // Solve the maze
+        // Create LLM service based on provider
+        ILlmService llmService;
+        string providerNorm = provider.ToLowerInvariant();
+
+        if (providerNorm is "copilot" or "github" or "githubcopilot")
+        {
+            var modelName = !string.IsNullOrEmpty(model) ? model : null;
+            llmService = await CreateCopilotServiceAsync(modelName);
+            Console.WriteLine($"Provider: GitHub Copilot ({modelName ?? "default"})");
+        }
+        else
+        {
+            llmService = new LlmService();
+            Console.WriteLine($"Provider: Anthropic (env vars)");
+        }
+
         Console.WriteLine("Starting maze solver...");
         Console.WriteLine();
 
-        var llmService = new LlmService();
         var solverService = new MazeSolverService(llmService);
 
         // Set up event handlers for CLI output
@@ -215,6 +248,66 @@ public class Program
 
         Log.Information("CLI run completed. Success: {Success}, Tool calls: {ToolCalls}, Tokens: {Tokens}",
             result.Success, result.ToolCallCount, result.TotalTokens);
+    }
+
+    /// <summary>
+    /// Creates a GitHub Copilot LLM service using cached token or device flow fallback.
+    /// Shared between GUI (via cache saved by GUI login) and CLI.
+    /// </summary>
+    private static async Task<ILlmService> CreateCopilotServiceAsync(string? modelName)
+    {
+        var (cachedToken, lastModel) = GitHubTokenCache.LoadToken();
+        string? githubAccessToken = cachedToken;
+        modelName ??= lastModel ?? "claude-sonnet-4";
+
+        // Try cached token first
+        if (!string.IsNullOrEmpty(githubAccessToken))
+        {
+            try
+            {
+                Console.WriteLine("Using cached GitHub token...");
+                var service = await BuildCopilotService(githubAccessToken, modelName);
+                // Update cache with current model
+                GitHubTokenCache.SaveToken(githubAccessToken, modelName);
+                return service;
+            }
+            catch (UnauthorizedAccessException)
+            {
+                Console.WriteLine("Cached token is invalid/expired. Clearing and re-authenticating...");
+                Log.Warning("Cached GitHub token is invalid. Clearing cache.");
+                GitHubTokenCache.ClearToken();
+                githubAccessToken = null;
+            }
+        }
+
+        // No cached token or it was invalid → device flow
+        Console.WriteLine();
+        Console.WriteLine("GitHub authentication required.");
+        using var authenticator = new GitHubDeviceFlowAuthenticator((userCode, verificationUrl) =>
+        {
+            Console.WriteLine($"  Please visit: {verificationUrl}");
+            Console.WriteLine($"  And enter code: {userCode}");
+            Console.WriteLine();
+            Console.WriteLine("  Waiting for authorization...");
+        });
+
+        githubAccessToken = await authenticator.AuthenticateAsync();
+        var newService = await BuildCopilotService(githubAccessToken, modelName);
+
+        // Cache the new token
+        GitHubTokenCache.SaveToken(githubAccessToken, modelName);
+        Console.WriteLine("GitHub token cached for future runs.");
+
+        return newService;
+    }
+
+    private static async Task<ILlmService> BuildCopilotService(string githubAccessToken, string modelName)
+    {
+        var tokenProvider = new GitHubCopilotTokenProvider(githubAccessToken);
+        await tokenProvider.GetCopilotTokenAsync();
+
+        var chatClient = new GitHubCopilotChatClient(tokenProvider, modelName);
+        return new GitHubCopilotLlmService(chatClient, modelName);
     }
 
     private static void RunGui(int width, int height, bool autoSolve)

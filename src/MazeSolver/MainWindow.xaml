@@ -20,6 +20,31 @@
         <!-- Control Panel -->
         <Border Grid.Row="0" Background="#F0F0F0" Padding="10">
             <StackPanel>
+                <!-- Row 1: Provider selection and model -->
+                <StackPanel Orientation="Horizontal" Margin="0,0,0,5">
+                    <Label Content="Provider:" FontWeight="Bold"/>
+                    <ComboBox x:Name="ProviderComboBox" Width="140" SelectionChanged="ProviderComboBox_SelectionChanged">
+                        <ComboBoxItem Content="Anthropic (Env Vars)" Tag="Anthropic" IsSelected="True"/>
+                        <ComboBoxItem Content="GitHub Copilot" Tag="GitHubCopilot"/>
+                    </ComboBox>
+                    
+                    <Label Content="Model:" Margin="10,0,0,0" FontWeight="Bold"/>
+                    <ComboBox x:Name="ModelComboBox" Width="250" IsEditable="True" Text="" 
+                              ToolTip="Select or type a model name"/>
+                    
+                    <Button x:Name="RefreshModelsButton" Content="🔄" Width="30" 
+                            Click="RefreshModelsButton_Click" Margin="5,0,0,0"
+                            ToolTip="Refresh available models"/>
+                    
+                    <Button x:Name="ConnectButton" Content="🔗 Connect" 
+                            Click="ConnectButton_Click" Margin="10,0,0,0"
+                            ToolTip="Connect to the selected provider"/>
+                    
+                    <TextBlock x:Name="ConnectionStatusText" Text="⚪ Not connected" 
+                               VerticalAlignment="Center" Margin="10,0,0,0"/>
+                </StackPanel>
+                
+                <!-- Row 2: Maze controls -->
                 <StackPanel Orientation="Horizontal">
                     <Label Content="Width:"/>
                     <TextBox x:Name="WidthTextBox" Width="60" Text="100"/>
