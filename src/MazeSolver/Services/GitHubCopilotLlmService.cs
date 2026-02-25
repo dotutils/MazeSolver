@@ -13,16 +13,37 @@ public class GitHubCopilotLlmService : ILlmService, IDisposable
 {
     private readonly GitHubCopilotChatClient _client;
     private readonly string _modelName;
+    private readonly GitHubCopilotTokenProvider? _tokenProvider;
 
     /// <summary>
     /// Context window varies by model; default to 128K which is conservative for most models.
+    /// Will be updated from the models API when available.
     /// </summary>
     public int MaxContextTokens { get; set; } = 128_000;
 
-    public GitHubCopilotLlmService(GitHubCopilotChatClient client, string modelName)
+    public GitHubCopilotLlmService(GitHubCopilotChatClient client, string modelName, GitHubCopilotTokenProvider? tokenProvider = null)
     {
         _client = client ?? throw new ArgumentNullException(nameof(client));
         _modelName = modelName;
+        _tokenProvider = tokenProvider;
+    }
+
+    /// <summary>
+    /// Queries the models API to set the accurate context window size for the current model.
+    /// Should be called after construction. Returns the resolved value.
+    /// </summary>
+    public async Task<int> ResolveContextWindowAsync(CancellationToken cancellationToken = default)
+    {
+        if (_tokenProvider != null)
+        {
+            var contextWindow = await _tokenProvider.GetModelContextWindowAsync(_modelName, cancellationToken);
+            if (contextWindow.HasValue)
+            {
+                MaxContextTokens = contextWindow.Value;
+                Log.Information("Set MaxContextTokens to {MaxContextTokens:N0} for model {Model}", MaxContextTokens, _modelName);
+            }
+        }
+        return MaxContextTokens;
     }
 
     public async Task<LlmResponse> SendMessageAsync(
@@ -94,6 +115,27 @@ public class GitHubCopilotLlmService : ILlmService, IDisposable
             {
                 Log.Error(ex, "Context overflow detected");
                 throw new ContextOverflowException("Context window exceeded", ex);
+            }
+            catch (HttpRequestException ex) when (
+                ex.Message.Contains("timed out", StringComparison.OrdinalIgnoreCase) &&
+                attempt < maxRetries)
+            {
+                Log.Warning(ex, "HTTP timeout (attempt {Attempt}/{MaxRetries}). Retrying in {Delay}s...",
+                    attempt, maxRetries, retryDelaySeconds);
+                await Task.Delay(TimeSpan.FromSeconds(retryDelaySeconds), cancellationToken);
+                retryDelaySeconds *= 2;
+            }
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+            {
+                Log.Warning("Operation cancelled by user");
+                throw;
+            }
+            catch (Exception ex) when (attempt < maxRetries)
+            {
+                Log.Warning(ex, "Unexpected error (attempt {Attempt}/{MaxRetries}): {Type} - {Message}. Retrying in {Delay}s...",
+                    attempt, maxRetries, ex.GetType().Name, ex.Message, retryDelaySeconds);
+                await Task.Delay(TimeSpan.FromSeconds(retryDelaySeconds), cancellationToken);
+                retryDelaySeconds *= 2;
             }
         }
 

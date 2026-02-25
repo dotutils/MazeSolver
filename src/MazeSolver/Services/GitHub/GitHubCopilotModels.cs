@@ -105,10 +105,51 @@ public class ModelInfo
     [JsonPropertyName("model_picker_enabled")]
     public bool ModelPickerEnabled { get; set; }
 
+    [JsonPropertyName("capabilities")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public ModelCapabilities? Capabilities { get; set; }
+
     [JsonPropertyName("policy")]
     public ModelPolicy Policy { get; set; } = new();
 
+    /// <summary>
+    /// Returns the max context window tokens from capabilities, or null if not available.
+    /// </summary>
+    [JsonIgnore]
+    public int? MaxContextWindowTokens => Capabilities?.Limits?.MaxContextWindowTokens;
+
     public override string ToString() => string.IsNullOrEmpty(Name) ? Id : $"{Name} ({Id})";
+}
+
+/// <summary>
+/// Model capabilities returned by the Copilot models API.
+/// </summary>
+public class ModelCapabilities
+{
+    [JsonPropertyName("family")]
+    public string Family { get; set; } = string.Empty;
+
+    [JsonPropertyName("limits")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public ModelLimits? Limits { get; set; }
+
+    [JsonPropertyName("type")]
+    public string Type { get; set; } = string.Empty;
+}
+
+/// <summary>
+/// Token limits for a model.
+/// </summary>
+public class ModelLimits
+{
+    [JsonPropertyName("max_context_window_tokens")]
+    public int? MaxContextWindowTokens { get; set; }
+
+    [JsonPropertyName("max_output_tokens")]
+    public int? MaxOutputTokens { get; set; }
+
+    [JsonPropertyName("max_prompt_tokens")]
+    public int? MaxPromptTokens { get; set; }
 }
 
 /// <summary>

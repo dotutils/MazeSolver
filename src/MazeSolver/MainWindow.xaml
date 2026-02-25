@@ -145,7 +145,7 @@
                 <!-- Token Info -->
                 <StackPanel Grid.Row="0" Grid.Column="0" Orientation="Horizontal" Margin="0,0,20,5">
                     <TextBlock Text="Context Usage: " FontWeight="Bold"/>
-                    <TextBlock x:Name="TokenUsageText" Text="0 / 200,000 tokens"/>
+                    <TextBlock x:Name="TokenUsageText" Text="0 tokens"/>
                     <TextBlock Text=" (" Margin="5,0,0,0"/>
                     <TextBlock x:Name="TokenPercentageText" Text="0.0%"/>
                     <TextBlock Text=")"/>

@@ -13,6 +13,21 @@ public class Program
         // Configure Serilog
         ConfigureLogging();
 
+        // Global unhandled exception handler - catches exceptions that bypass try/catch
+        AppDomain.CurrentDomain.UnhandledException += (sender, e) =>
+        {
+            var ex = e.ExceptionObject as Exception;
+            Log.Fatal(ex, "UNHANDLED DOMAIN EXCEPTION (IsTerminating={IsTerminating})", e.IsTerminating);
+            Console.Error.WriteLine($"UNHANDLED DOMAIN EXCEPTION: {ex}");
+            Log.CloseAndFlush();
+        };
+
+        TaskScheduler.UnobservedTaskException += (sender, e) =>
+        {
+            Log.Fatal(e.Exception, "UNOBSERVED TASK EXCEPTION");
+            Console.Error.WriteLine($"UNOBSERVED TASK EXCEPTION: {e.Exception}");
+        };
+
         Log.Information("=== Maze Solver Starting ===");
         Log.Information("Arguments: {Args}", string.Join(" ", args));
 
@@ -20,6 +35,7 @@ public class Program
         bool cli = args.Contains("--cli");
         bool autoSolve = args.Contains("--auto-solve");
         bool testConnection = args.Contains("--test-connection");
+        bool listModels = args.Contains("--list-models");
         int width = GetIntArg(args, "--width", 100);
         int height = GetIntArg(args, "--height", 100);
         string provider = GetStringArg(args, "--provider", "anthropic");
@@ -30,6 +46,12 @@ public class Program
             if (testConnection)
             {
                 TestConnectionAsync().GetAwaiter().GetResult();
+                return 0;
+            }
+
+            if (listModels)
+            {
+                ListModelsAsync().GetAwaiter().GetResult();
                 return 0;
             }
 
@@ -251,6 +273,32 @@ public class Program
     }
 
     /// <summary>
+    /// Lists available GitHub Copilot models.
+    /// </summary>
+    private static async Task ListModelsAsync()
+    {
+        var (cachedToken, _) = GitHubTokenCache.LoadToken();
+        if (string.IsNullOrEmpty(cachedToken))
+        {
+            Console.WriteLine("No cached GitHub token. Run with --cli first to authenticate.");
+            return;
+        }
+
+        var tokenProvider = new GitHubCopilotTokenProvider(cachedToken);
+        await tokenProvider.GetCopilotTokenAsync();
+        var models = await tokenProvider.GetAvailableModelsAsync();
+
+        Console.WriteLine($"Available models ({models.Count}):");
+        Console.WriteLine(new string('-', 80));
+        foreach (var m in models.OrderBy(x => x.Id))
+        {
+            var enabled = m.ModelPickerEnabled ? "✓" : " ";
+            var policy = m.Policy?.State ?? "";
+            Console.WriteLine($"  [{enabled}] {m.Id,-50} {policy}");
+        }
+    }
+
+    /// <summary>
     /// Creates a GitHub Copilot LLM service using cached token or device flow fallback.
     /// Shared between GUI (via cache saved by GUI login) and CLI.
     /// </summary>
@@ -307,7 +355,12 @@ public class Program
         await tokenProvider.GetCopilotTokenAsync();
 
         var chatClient = new GitHubCopilotChatClient(tokenProvider, modelName);
-        return new GitHubCopilotLlmService(chatClient, modelName);
+        var service = new GitHubCopilotLlmService(chatClient, modelName, tokenProvider);
+        
+        // Query the actual context window size for this model
+        await service.ResolveContextWindowAsync();
+        
+        return service;
     }
 
     private static void RunGui(int width, int height, bool autoSolve)

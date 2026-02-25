@@ -96,6 +96,34 @@ public class GitHubCopilotTokenProvider : IDisposable
         return modelsResponse?.Data ?? new List<ModelInfo>();
     }
 
+    /// <summary>
+    /// Queries the models API and returns the max_context_window_tokens for the given model.
+    /// Returns null if the model is not found or the field is missing.
+    /// </summary>
+    public async Task<int?> GetModelContextWindowAsync(string modelId, CancellationToken cancellationToken = default)
+    {
+        try
+        {
+            var models = await GetAvailableModelsAsync(cancellationToken);
+            var model = models.FirstOrDefault(m => 
+                string.Equals(m.Id, modelId, StringComparison.OrdinalIgnoreCase));
+            
+            if (model?.MaxContextWindowTokens is int contextWindow)
+            {
+                Log.Information("Model {ModelId} context window: {ContextWindow:N0} tokens", modelId, contextWindow);
+                return contextWindow;
+            }
+            
+            Log.Warning("Could not determine context window for model {ModelId}", modelId);
+            return null;
+        }
+        catch (Exception ex)
+        {
+            Log.Warning(ex, "Failed to query model context window for {ModelId}", modelId);
+            return null;
+        }
+    }
+
     private string ExtractBaseUrlFromToken(string token, CopilotAccountType accountType)
     {
         var match = Regex.Match(token, @"proxy-ep=([^;]+)");

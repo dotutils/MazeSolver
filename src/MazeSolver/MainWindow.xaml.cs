@@ -59,6 +59,7 @@ public partial class MainWindow : Window
                     _solverService = new MazeSolverService(_llmService);
                     SetupSolverEvents();
                     UpdateConnectionStatus(true, "Anthropic", model);
+                    UpdateMaxTokensDisplay();
                 }
                 else
                 {
@@ -441,13 +442,19 @@ public partial class MainWindow : Window
         await _copilotTokenProvider.GetCopilotTokenAsync();
 
         var chatClient = new GitHubCopilotChatClient(_copilotTokenProvider, modelName);
-        _llmService = new GitHubCopilotLlmService(chatClient, modelName);
+        var copilotService = new GitHubCopilotLlmService(chatClient, modelName, _copilotTokenProvider);
+        _llmService = copilotService;
 
         StatusText.Text = "Testing connection...";
         var success = await _llmService.TestConnectionAsync();
 
         if (success)
         {
+            // Query the actual context window size for this model
+            StatusText.Text = "Querying model context window...";
+            await copilotService.ResolveContextWindowAsync();
+            UpdateMaxTokensDisplay();
+
             _solverService = new MazeSolverService(_llmService);
             SetupSolverEvents();
             UpdateConnectionStatus(true, "GitHub Copilot", modelName);
@@ -466,6 +473,7 @@ public partial class MainWindow : Window
         _solverService = new MazeSolverService(_llmService);
         SetupSolverEvents();
         UpdateConnectionStatus(true, "Anthropic", modelName);
+        UpdateMaxTokensDisplay();
         StatusText.Text = $"Connected to Anthropic ({modelName})";
     }
 
@@ -497,13 +505,24 @@ public partial class MainWindow : Window
         // Reset counters
         ToolCallCountText.Text = "0";
         ContextUsageCallCountText.Text = "0";
-        TokenUsageText.Text = "0 / 200,000 tokens";
+        UpdateMaxTokensDisplay();
         TokenPercentageText.Text = "0.0%";
         InputTokensText.Text = "0";
         OutputTokensText.Text = "0";
         ContextProgressBar.Value = 0;
         ProgressText.Text = "0%";
         ContextProgressBar.Foreground = new SolidColorBrush(Colors.Green);
+    }
+
+    /// <summary>
+    /// Updates the token display to show "0 / X tokens" using the current LLM service's MaxContextTokens.
+    /// </summary>
+    private void UpdateMaxTokensDisplay()
+    {
+        var maxTokens = _llmService?.MaxContextTokens ?? 0;
+        TokenUsageText.Text = maxTokens > 0 
+            ? $"0 / {maxTokens:N0} tokens" 
+            : "0 tokens (context size unknown)";
     }
 
     private void RenderMaze()

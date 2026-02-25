@@ -23,7 +23,7 @@ public class GitHubCopilotChatClient : IDisposable
     {
         _tokenProvider = tokenProvider ?? throw new ArgumentNullException(nameof(tokenProvider));
         _modelName = modelName ?? throw new ArgumentNullException(nameof(modelName));
-        _httpClient = new HttpClient();
+        _httpClient = new HttpClient { Timeout = TimeSpan.FromMinutes(10) };
     }
 
     /// <summary>
@@ -56,7 +56,33 @@ public class GitHubCopilotChatClient : IDisposable
             Encoding.UTF8,
             "application/json");
 
-        var httpResponse = await _httpClient.SendAsync(httpRequest, cancellationToken);
+        HttpResponseMessage httpResponse;
+        try
+        {
+            Log.Debug("[GitHubCopilot] Sending HTTP request...");
+            httpResponse = await _httpClient.SendAsync(httpRequest, cancellationToken);
+            Log.Debug("[GitHubCopilot] HTTP response received. Status: {StatusCode}", (int)httpResponse.StatusCode);
+        }
+        catch (TaskCanceledException ex) when (!cancellationToken.IsCancellationRequested)
+        {
+            Log.Error(ex, "[GitHubCopilot] HTTP request timed out after {Timeout}", _httpClient.Timeout);
+            throw new HttpRequestException($"HTTP request timed out after {_httpClient.Timeout}", ex);
+        }
+        catch (TaskCanceledException ex)
+        {
+            Log.Warning("[GitHubCopilot] HTTP request was cancelled by user");
+            throw new OperationCanceledException("Request cancelled", ex, cancellationToken);
+        }
+        catch (HttpRequestException ex)
+        {
+            Log.Error(ex, "[GitHubCopilot] HTTP request failed: {Message}", ex.Message);
+            throw;
+        }
+        catch (Exception ex)
+        {
+            Log.Error(ex, "[GitHubCopilot] Unexpected error during HTTP request: {Type} - {Message}", ex.GetType().Name, ex.Message);
+            throw;
+        }
 
         if (!httpResponse.IsSuccessStatusCode)
         {
@@ -67,12 +93,24 @@ public class GitHubCopilotChatClient : IDisposable
                 $"GitHub Copilot API returned {(int)httpResponse.StatusCode} ({httpResponse.ReasonPhrase}): {errorContent}");
         }
 
-        var responseJson = await httpResponse.Content.ReadAsStringAsync();
+        string responseJson;
+        try
+        {
+            responseJson = await httpResponse.Content.ReadAsStringAsync();
+            Log.Debug("[GitHubCopilot] Response length: {Length} chars", responseJson.Length);
+        }
+        catch (Exception ex)
+        {
+            Log.Error(ex, "[GitHubCopilot] Failed to read response body: {Type} - {Message}", ex.GetType().Name, ex.Message);
+            throw;
+        }
+
         Log.Debug("[GitHubCopilot] Raw response: {Json}", responseJson);
         var copilotResponse = JsonSerializer.Deserialize<CopilotChatCompletionResponse>(responseJson);
 
         if (copilotResponse == null || copilotResponse.Choices.Count == 0)
         {
+            Log.Error("[GitHubCopilot] Invalid/empty response. JSON: {Json}", responseJson);
             throw new InvalidOperationException("Invalid response from GitHub Copilot");
         }
 
