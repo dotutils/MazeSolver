@@ -1,0 +1,45 @@
+name: Test Generative Bot
+
+on:
+  pull_request:
+    branches:
+      - main
+    types:
+      - labeled
+      - synchronize
+      - reopened
+
+permissions:
+  pull-requests: write
+  contents: write
+
+jobs:
+  coverage:
+    if: |
+      (
+        (github.event.action == 'labeled' && contains(github.event.label.name, 'qodo-cover')) ||
+        (github.event.action == 'synchronize' && contains(github.event.pull_request.labels.*.name, 'qodo-cover')) ||
+        (github.event.action == 'reopened' && contains(github.event.pull_request.labels.*.name, 'qodo-cover'))
+      ) &&
+      github.event.pull_request.state == 'open' &&
+      github.event.pull_request.draft == false
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          fetch-depth: 0
+        
+      - name: Run Qodo Coverage Bot
+        uses: qodo-ai/command@v1
+        with:
+          prompt: "qodo-cover"
+          agent-file: "${{ github.workspace }}/.qodo/agents/qodo-cover.toml"
+          key-value-pairs: |
+            desired_coverage=80
+        env:
+          QODO_API_KEY: ${{ secrets.QODO_API_KEY }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
