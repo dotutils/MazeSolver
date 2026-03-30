@@ -64,7 +64,7 @@ public class MazeGenerator
             var newY = pos.Y + dy;
             var newPos = new Position(newX, newY);
 
-            if (maze[newPos].Type == maze.Exit)
+            if (newPos == maze.Exit)
             {
                 return true;
             }
