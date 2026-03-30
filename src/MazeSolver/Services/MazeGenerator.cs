@@ -23,10 +23,6 @@ public class MazeGenerator
 
         var maze = new Maze(width, height);
 
-        // Carve paths using DFS from (1, 1)
-        var startPos = new Position(1, 1);
-        CarvePath(maze, startPos);
-
         // Set entry at top-left accessible position
         maze.SetEntry(new Position(1, 0));
         maze[1, 0].Type = CellType.Entry;
@@ -39,8 +35,12 @@ public class MazeGenerator
         maze[1, 1].Type = CellType.Path;
         maze[width - 2, height - 2].Type = CellType.Path;
 
+        // Carve paths using DFS from (1, 1)
+        var startPos = new Position(1, 1);
+        bool isSolvable = CarvePath(maze, startPos);
+
         // Verify the maze is solvable
-        if (!IsSolvable(maze))
+        if (!isSolvable)
         {
             Log.Warning("Generated maze was not solvable, regenerating...");
             return Generate(width, height);
@@ -50,7 +50,7 @@ public class MazeGenerator
         return maze;
     }
 
-    private void CarvePath(Maze maze, Position pos)
+    private bool CarvePath(Maze maze, Position pos)
     {
         maze[pos].Type = CellType.Path;
 
@@ -64,6 +64,11 @@ public class MazeGenerator
             var newY = pos.Y + dy;
             var newPos = new Position(newX, newY);
 
+            if (newPos == maze.Exit)
+            {
+                return true;
+            }
+            
             // Check if the new position is valid and unvisited
             if (maze.IsInBounds(newPos) && maze[newPos].Type == CellType.Wall)
             {
@@ -75,6 +80,8 @@ public class MazeGenerator
                 CarvePath(maze, newPos);
             }
         }
+
+        return false;
     }
 
     private void Shuffle<T>(List<T> list)
